@@ -366,11 +366,16 @@ class ArmadaContext(ArmadaContextBase):
                 async def launch() -> None:
                     logger.info("Launching %s Mission %s (%s) through %s.",
                                 mission["faction"], mission["number"], mission["title"], map_name)
+                    if ctx.game_root is None:
+                        ctx.game_root = await asyncio.to_thread(prompt_for_game_root)
+                    if ctx.game_root is None:
+                        logger.error("Armada launch cancelled: select the folder containing Armada.exe to continue.")
+                        return
                     # For a fresh process, the injector provides the selected
                     # map before resuming Armada. A running process uses the
                     # established control pipe instead.
                     started = await asyncio.to_thread(
-                        start_armada_and_observer, ctx.client_root, ctx.game_root, map_name
+                        start_armada_and_observer, ctx.game_root, map_name
                     )
                     if started:
                         logger.info("Armada prequeued %s for its native startup campaign controller route.", map_name)
@@ -673,13 +678,16 @@ def stop_armada_process(pid: object) -> None:
         logger.warning("Could not close Armada PID %s after mission result: %s", target, result.stderr.strip())
 
 
-def start_armada_and_observer(client_root: Path, game_root: Path, launch_map: str | None = None) -> bool:
+def start_armada_and_observer(game_root: Path, launch_map: str | None = None) -> bool:
     game = game_root / "Armada.exe"
-    injector = client_root / "bin" / "armada_injector.exe"
-    observer = client_root / "bin" / "armada_observer.dll"
+    injector = game_root / "armada_injector.exe"
+    observer = game_root / "armada_observer.dll"
     for path in (game, injector, observer):
         if not path.is_file():
-            raise RuntimeError(f"Required Armada client file is missing: {path}")
+            raise RuntimeError(
+                f"Required Armada file is missing: {path}. Copy armada_observer.dll and "
+                "armada_injector.exe from the Armada APWorld release into the folder containing Armada.exe."
+            )
     pid = find_armada_pid()
     started = False
     if not pid:
@@ -718,19 +726,92 @@ def default_ledger_path() -> Path:
     return local_app_data / "Archipelago" / "StarTrekArmada" / "armada-client.json"
 
 
-def default_path_from_environment(variable: str) -> Path:
-    """Read an optional client path override."""
-    return Path(os.environ.get(variable, Path.cwd()))
+def client_data_directory() -> Path:
+    """Return the private writable directory used by the packaged client."""
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return local_app_data / "Archipelago" / "StarTrekArmada"
+
+
+def client_settings_path() -> Path:
+    return client_data_directory() / "settings.json"
+
+
+def load_client_settings() -> dict[str, object]:
+    try:
+        settings = json.loads(client_settings_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def save_client_settings(settings: dict[str, object]) -> None:
+    path = client_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(settings, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def configured_game_root(explicit: Path | None = None) -> Path | None:
+    """Return a valid configured Armada installation, if one is known."""
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit)
+    legacy_environment = os.environ.get("STAR_TREK_ARMADA_GAME_ROOT")
+    if legacy_environment:
+        candidates.append(Path(legacy_environment))
+    saved = load_client_settings().get("game_root")
+    if isinstance(saved, str):
+        candidates.append(Path(saved))
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if (candidate / "Armada.exe").is_file():
+            return candidate
+    return None
+
+
+def prompt_for_game_root() -> Path | None:
+    """Ask once for the retail install folder using Windows' standard picker."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+    except ImportError:
+        logger.error("Unable to open the Armada folder picker; start with --game-root instead.")
+        return None
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        while True:
+            selection = filedialog.askdirectory(
+                parent=root,
+                title="Select the Star Trek: Armada installation folder",
+            )
+            if not selection:
+                return None
+            game_root = Path(selection)
+            if (game_root / "Armada.exe").is_file():
+                settings = load_client_settings()
+                settings["game_root"] = str(game_root)
+                save_client_settings(settings)
+                logger.info("Saved Star Trek: Armada installation folder: %s", game_root)
+                return game_root
+            messagebox.showerror(
+                "Armada.exe not found",
+                "Select the folder that contains Armada.exe.",
+                parent=root,
+            )
+    finally:
+        root.destroy()
 
 
 async def run(connect: str | None, password: str | None, name: str | None,
-              client_root: Path, game_root: Path) -> None:
+              game_root: Path | None) -> None:
     """Run as a normal Archipelago client with an embedded mission-launcher tab."""
     ledger = Ledger(default_ledger_path())
     try:
         ctx = ArmadaContext(connect, password, ledger)
         ctx.username = name
-        ctx.client_root = client_root
         ctx.game_root = game_root
         ctx.server_task = asyncio.create_task(server_loop(ctx), name="server loop")
         if UNIVERSAL_TRACKER_AVAILABLE:
@@ -751,14 +832,15 @@ def launch(*args: str) -> None:
     Utils.init_logging("StarTrekArmadaClient")
     parser = get_base_parser()
     parser.add_argument("--name", default=None, help="Slot name to connect as.")
-    parser.add_argument("--client-root", type=Path,
-                        default=default_path_from_environment("STAR_TREK_ARMADA_CLIENT_ROOT"))
-    parser.add_argument("--game-root", type=Path,
-                        default=default_path_from_environment("STAR_TREK_ARMADA_GAME_ROOT"))
+    parser.add_argument("--game-root", type=Path, default=None,
+                        help="override the saved folder that contains Armada.exe")
     parser.add_argument("--diagnose", action="store_true", help="validate client startup paths without launching Armada")
     parser.add_argument("url", nargs="?", help="Archipelago connection URL")
     parsed = handle_url_arg(parser.parse_args(args), parser=parser)
+    game_root = configured_game_root(parsed.game_root)
     if parsed.diagnose:
-        logger.info("Armada client paths: game_root=%s client_root=%s", parsed.game_root, parsed.client_root)
+        logger.info("Armada client game_root=%s", game_root)
         return
-    asyncio.run(run(parsed.connect, parsed.password, parsed.name, parsed.client_root, parsed.game_root))
+    if game_root is None and gui_enabled:
+        game_root = prompt_for_game_root()
+    asyncio.run(run(parsed.connect, parsed.password, parsed.name, game_root))

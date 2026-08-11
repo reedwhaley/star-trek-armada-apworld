@@ -17,11 +17,11 @@ RELEASE_README = (
     "- Archipelago 0.6.7 or newer\n"
     "- A legally obtained retail copy of Star Trek: Armada\n\n"
     "Installation\n------------\n"
-    "1. Extract this archive to a permanent folder.\n"
-    "2. Install star_trek_armada.apworld with the Archipelago Launcher.\n"
-    "3. Set STAR_TREK_ARMADA_CLIENT_ROOT to this extracted folder.\n"
-    "4. Set STAR_TREK_ARMADA_GAME_ROOT to the folder containing Armada.exe.\n"
-    "5. Restart the Archipelago Launcher, then open Star Trek: Armada Client.\n\n"
+    "1. Extract this archive.\n"
+    "2. Copy armada_observer.dll and armada_injector.exe into the folder containing Armada.exe.\n"
+    "3. Install star_trek_armada.apworld with the Archipelago Launcher.\n"
+    "4. Restart the Archipelago Launcher, then open Star Trek: Armada Client.\n"
+    "5. On first launch, select the folder containing Armada.exe when prompted.\n\n"
     "This unofficial project contains no Armada game files or modified game executables.\n"
 )
 
@@ -60,7 +60,7 @@ def main() -> int:
     with ZipFile(archive_path, "w", ZIP_DEFLATED) as archive:
         archive.write(apworld, "star_trek_armada.apworld")
         for binary in binaries:
-            archive.write(binary, f"bin/{binary.name}")
+            archive.write(binary, binary.name)
         archive.writestr("README.txt", RELEASE_README)
     print(archive_path)
     return 0

@@ -2,7 +2,7 @@
   "game": "Star Trek: Armada",
   "authors": ["Reed Whaley"],
   "minimum_ap_version": "0.6.7",
-  "world_version": "0.6.3",
+  "world_version": "0.6.4",
   "compatible_version": 1,
   "version": 7
 }

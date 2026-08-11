@@ -40,7 +40,8 @@ Create a distributable Windows release archive after building the binaries:
 python tools/scripts/build_release.py
 ```
 
-Install the resulting `out/star_trek_armada.apworld` into Archipelago, restart
-the Archipelago Launcher, and open **Star Trek: Armada Client**. See the
-[setup guide](apworld/star_trek_armada/docs/setup_en.md) for client and game
-configuration.
+The Windows release archive contains `star_trek_armada.apworld`,
+`armada_observer.dll`, and `armada_injector.exe`. Copy the two native files
+beside the player's `Armada.exe`, install the APWorld, and open **Star Trek:
+Armada Client**. It asks for the Armada installation folder on first launch and
+saves that selection. See the [setup guide](apworld/star_trek_armada/docs/setup_en.md).

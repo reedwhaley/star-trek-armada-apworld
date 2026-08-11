@@ -17,18 +17,20 @@ checks, mission access items, campaign keys, and faction capability items.
 
 ## Client
 
-Install `star_trek_armada.apworld` into Archipelago, then restart the
-Archipelago Launcher. Its **Client** category contains **Star Trek: Armada
-Client**. It opens a dedicated client window rather than the generic text
-client. Enter the room address, slot name, and optional password there. The
-window shows received items and campaign missions that are currently unlocked;
-starting Armada attaches the matching observer automatically. No separate
-pipe reader, injector command, or bridge command is required.
+Copy `armada_observer.dll` and `armada_injector.exe` from the release into the
+folder containing the retail `Armada.exe`, then install
+`star_trek_armada.apworld` into Archipelago and restart the Archipelago
+Launcher. Its **Client** category contains **Star Trek: Armada Client**. On its
+first launch, the client opens the standard Windows folder picker; select the
+folder containing `Armada.exe`. The selection is saved per user. Enter the room
+address, slot name, and optional password in the normal Archipelago client. The
+Mission Launcher shows received items and campaign missions that are currently
+unlocked; starting Armada attaches the matching observer automatically. No
+separate pipe reader, injector command, bridge command, or environment variable
+is required.
 
-When launched from a terminal, set `--game-root` to the retail Armada
-installation and `--client-root` to the folder containing the `bin` directory
-with the observer and injector. You can also set `STAR_TREK_ARMADA_GAME_ROOT` and
-`STAR_TREK_ARMADA_CLIENT_ROOT` before launching the client.
+When launched from a terminal, `--game-root` can override the saved retail
+Armada installation folder.
 
 `objective_transition_checks` is a checkbox. Disable it for completion-only
 generation; enable it (the default) for the full static objective-transition
