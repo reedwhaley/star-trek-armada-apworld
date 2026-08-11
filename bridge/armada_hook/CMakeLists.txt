@@ -1,0 +1,6 @@
+add_library(armada_observer SHARED armada_observer.cpp armada_observer.h)
+target_compile_definitions(armada_observer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+if(ARMADA_USE_CAMPAIGN_PICKER_ROUTE)
+    target_compile_definitions(armada_observer PRIVATE ARMADA_FULL_PICKER_TEST=1)
+endif()
+set_target_properties(armada_observer PROPERTIES OUTPUT_NAME "armada_observer")

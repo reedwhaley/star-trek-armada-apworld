@@ -1,0 +1,3 @@
+add_executable(armada_injector armada_injector.cpp)
+target_compile_definitions(armada_injector PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(armada_injector PROPERTIES OUTPUT_NAME "armada_injector")
