@@ -9,13 +9,9 @@
 namespace {
 typedef void (__cdecl *MissionResultFn)(float, const char*);
 typedef void (__cdecl *ObjectiveTextFn)(const char*);
-typedef void (__cdecl *MovieFn)(char*, int);
-typedef bool (__cdecl *MoviePlayingFn)();
-typedef void (__cdecl *StopMovieFn)();
 typedef void (__cdecl *FrontEndModalDispatchFn)(int);
 typedef INT_PTR (CALLBACK *CampaignDialogProcFn)(HWND, UINT, WPARAM, LPARAM);
 typedef bool (__thiscall *CampaignControllerDialogRouteFn)(void*);
-typedef void* (__stdcall *BinkOpenFn)(const char*, uint32_t);
 typedef DWORD (WINAPI *GetTickCountFn)();
 typedef DWORD (WINAPI *TimeGetTimeFn)();
 typedef BOOL (WINAPI *QueryPerformanceCounterFn)(LARGE_INTEGER*);
@@ -30,9 +26,6 @@ typedef bool (__thiscall *CampaignPickerPrepareFn)(void*);
 static MissionResultFn g_original_succeed = nullptr;
 static MissionResultFn g_original_fail = nullptr;
 static ObjectiveTextFn g_original_objective_text = nullptr;
-static MovieFn g_original_play_bridge_movie = nullptr;
-static MovieFn g_original_play_cinematic_movie = nullptr;
-static BinkOpenFn g_original_bink_open = nullptr;
 static GetTickCountFn g_original_get_tick_count = nullptr;
 static TimeGetTimeFn g_original_time_get_time = nullptr;
 static QueryPerformanceCounterFn g_original_query_performance_counter = nullptr;
@@ -58,9 +51,7 @@ static CRITICAL_SECTION g_queue_lock;
 static volatile LONG g_sequence = 0;
 static volatile LONG g_running = 1;
 static volatile LONG g_failure_exit_queued = 0;
-static volatile LONG g_skip_next_launch_movie = 0;
 static volatile LONG g_campaign_dispatch_retries = 0;
-static ULONGLONG g_skip_movie_deadline = 0;
 static volatile DWORD g_startup_game_thread = 0;
 // This is an explicitly requested, Federation 1-only proof harness.  It is
 // intentionally separate from the eventual AP trap implementation: nothing
@@ -295,8 +286,8 @@ static LRESULT CALLBACK CampaignDispatchHook(int code, WPARAM wparam, LPARAM lpa
         if (message && (message->message == kCampaignDispatchMessage ||
                         (message->message == WM_TIMER && message->wParam == kCampaignDispatchTimer))) {
             message->message = WM_NULL;
-            // The initial private message can arrive while Bink/startup is
-            // still constructing Armada's campaign engine. Keep the map
+            // The initial private message can arrive while startup is still
+            // constructing Armada's campaign engine. Keep the map
             // queued and let the UI timer retry once that stock state exists.
             if (DispatchStockCampaignSelection()) {
                 HWND window = FindGameWindow();
@@ -885,28 +876,6 @@ static void __cdecl HookObjectiveText(const char* text) {
         }
     }
 }
-static bool ConsumeLaunchMovieSkip() {
-    if (GetTickCount64() > g_skip_movie_deadline) { InterlockedExchange(&g_skip_next_launch_movie, 0); return false; }
-    return InterlockedCompareExchange(&g_skip_next_launch_movie, 0, 1) == 1;
-}
-static void __cdecl HookPlayBridgeMovie(char* filename, int value) {
-    if (ConsumeLaunchMovieSkip()) { Status("[ARMADA_OBSERVER] suppressed initial bridge movie\n"); return; }
-    if (g_original_play_bridge_movie) g_original_play_bridge_movie(filename, value);
-}
-static void __cdecl HookPlayCinematicMovie(char* filename, int value) {
-    if (ConsumeLaunchMovieSkip()) { Status("[ARMADA_OBSERVER] suppressed initial cinematic movie\n"); return; }
-    if (g_original_play_cinematic_movie) g_original_play_cinematic_movie(filename, value);
-}
-
-static bool IsStartupIntroBink(const char* filename) {
-    if (!filename) return false;
-    static const char needle[] = "stintro.bik";
-    for (const char* p = filename; *p; ++p) {
-        if (_strnicmp(p, needle, ARRAYSIZE(needle) - 1) == 0) return true;
-    }
-    return false;
-}
-
 static bool DispatchPendingCampaignFromGameThread() {
     char map[MAX_PATH] = {};
     EnterCriticalSection(&g_queue_lock);
@@ -1054,31 +1023,6 @@ static bool InstallArmadaQueryPerformanceCounterHook() {
     return false;
 }
 
-static void* __stdcall HookBinkOpen(const char* filename, uint32_t flags) {
-    if (IsStartupIntroBink(filename)) {
-        Status("[ARMADA_OBSERVER] suppressed STIntro.bik through Bink open failure\n");
-        return nullptr;
-    }
-    return g_original_bink_open ? g_original_bink_open(filename, flags) : nullptr;
-}
-
-static void InstallStartupBinkHook() {
-    const ULONGLONG deadline = GetTickCount64() + 60000;
-    while (GetTickCount64() < deadline && !g_original_bink_open) {
-        HMODULE bink = GetModuleHandleW(L"binkw32.dll");
-        if (bink) {
-            const uintptr_t bink_open = reinterpret_cast<uintptr_t>(GetProcAddress(bink, "_BinkOpen@8"));
-            if (InstallHook(bink_open, reinterpret_cast<void*>(&HookBinkOpen), reinterpret_cast<void**>(&g_original_bink_open), 9)) {
-                Status("[ARMADA_OBSERVER] Bink startup-video hook installed\n");
-            } else {
-                Status("[ARMADA_OBSERVER] Bink startup-video hook installation failed\n");
-            }
-            return;
-        }
-        Sleep(100);
-    }
-}
-
 static DWORD WINAPI Initialize(void*) {
     InitializeCriticalSection(&g_queue_lock);
     g_wake = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1151,24 +1095,13 @@ static DWORD WINAPI Initialize(void*) {
 #endif
     uintptr_t succeed = FindResultFunction("?SucceedMission@@YAXMPAD@Z", 0x00), fail = FindResultFunction("?FailMission@@YAXMPAD@Z", 0x01);
     uintptr_t objective_text = FindExport("?ObjectivesDisplay_Set_Text_From_File@@YAXPAD@Z");
-    uintptr_t play_bridge_movie = FindExport("?PlayBridgeMovie@@YAXPADH@Z");
-    uintptr_t play_cinematic_movie = FindExport("?PlayCinematicMovie@@YAXPADH@Z");
     bool ok_succeed = InstallHook(succeed, reinterpret_cast<void*>(&HookSucceed), reinterpret_cast<void**>(&g_original_succeed), 9);
     bool ok_fail = InstallHook(fail, reinterpret_cast<void*>(&HookFail), reinterpret_cast<void**>(&g_original_fail), 9);
     // Objective display has a 10-byte instruction boundary at its entry; do
     // not reuse the mission-result 9-byte boundary here.
     bool ok_objective = InstallHook(objective_text, reinterpret_cast<void*>(&HookObjectiveText), reinterpret_cast<void**>(&g_original_objective_text), 10);
-    // Both movie exports have a verified 9-byte instruction boundary.
-    bool ok_bridge_movie = InstallHook(play_bridge_movie, reinterpret_cast<void*>(&HookPlayBridgeMovie), reinterpret_cast<void**>(&g_original_play_bridge_movie), 9);
-    bool ok_cinematic_movie = InstallHook(play_cinematic_movie, reinterpret_cast<void*>(&HookPlayCinematicMovie), reinterpret_cast<void**>(&g_original_play_cinematic_movie), 9);
     const bool ok_tick_scheduler = InstallArmadaGetTickCountHook();
-    if (!FindGameWindow()) {
-        InterlockedExchange(&g_skip_next_launch_movie, 1);
-        g_skip_movie_deadline = GetTickCount64() + 60000;
-        Status("[ARMADA_OBSERVER] startup movie suppression armed\n");
-    }
-    InstallStartupBinkHook();
-    if (!ok_succeed || !ok_fail || !ok_objective || !ok_bridge_movie || !ok_cinematic_movie || !ok_tick_scheduler) Status("[ARMADA_OBSERVER] hook installation failed\n"); else Status("[ARMADA_OBSERVER] result, objective-display, movie, and Metaphasic test scheduler hooks installed\n"); return 0;
+    if (!ok_succeed || !ok_fail || !ok_objective || !ok_tick_scheduler) Status("[ARMADA_OBSERVER] hook installation failed\n"); else Status("[ARMADA_OBSERVER] result, objective-display, and Metaphasic test scheduler hooks installed\n"); return 0;
 }
 }
 

@@ -45,3 +45,8 @@ The Windows release archive contains `star_trek_armada.apworld`,
 beside the player's `Armada.exe`, install the APWorld, and open **Star Trek:
 Armada Client**. It asks for the Armada installation folder on first launch and
 saves that selection. See the [setup guide](apworld/star_trek_armada/docs/setup_en.md).
+
+The client can skip Armada's startup intro without a key macro or a game-code
+movie hook. Its saved Mission Launcher setting temporarily renames only
+`animations\STIntro.bik` while a client-launched Armada process is running and
+restores it when Armada exits. Campaign and ending cinematics remain untouched.

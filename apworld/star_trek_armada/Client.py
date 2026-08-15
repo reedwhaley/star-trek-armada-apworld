@@ -21,6 +21,7 @@ from pathlib import Path
 
 from CommonClient import (CommonContext, get_base_parser, gui_enabled, handle_url_arg,
                           logger, server_loop)
+from NetUtils import ClientStatus
 import Utils
 
 try:
@@ -46,6 +47,10 @@ ERROR_PIPE_BUSY = 231
 ERROR_NO_DATA = 232
 ERROR_BROKEN_PIPE = 109
 CREATE_NO_WINDOW = 0x08000000
+INTRO_MOVIE_NAME = "STIntro.bik"
+INTRO_MOVIE_DISABLED_NAME = "STIntro.bik.archipelago-disabled"
+_intro_restore_lock = threading.Lock()
+_intro_restore_roots: set[str] = set()
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
@@ -308,6 +313,8 @@ class ArmadaContext(ArmadaContextBase):
         self.item_effects: dict[str, list[str]] = {}
         self.trap_items: dict[str, dict[str, object]] = {}
         self.nebula_trap_amount = 0
+        self._goal_report_in_progress = False
+        self._goal_reported_for_connection = False
         self._trap_retry_scheduled = False
 
     async def server_auth(self, password_requested: bool = False) -> None:
@@ -321,19 +328,39 @@ class ArmadaContext(ArmadaContextBase):
         """Embed the campaign picker in the standard Archipelago Kivy client."""
         from kivy.clock import Clock
         from kivy.metrics import dp
+        from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.button import Button
+        from kivy.uix.checkbox import CheckBox
         from kivy.uix.gridlayout import GridLayout
         from kivy.uix.label import Label
         from kivy.uix.scrollview import ScrollView
         ctx = self
 
-        class MissionPanel(ScrollView):
+        class MissionPanel(BoxLayout):
             def __init__(self) -> None:
-                super().__init__()
-                self.layout = GridLayout(cols=1, spacing=dp(6), padding=dp(10), size_hint_y=None)
+                super().__init__(orientation="vertical", spacing=dp(6), padding=dp(10))
+                intro_option = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(6))
+                self.skip_intro = CheckBox(active=ctx.skip_startup_intro, size_hint_x=None, width=dp(32))
+                self.skip_intro.bind(active=self.set_skip_intro)
+                intro_option.add_widget(self.skip_intro)
+                intro_option.add_widget(Label(
+                    text="Skip Armada startup intro (temporarily disables STIntro.bik while Armada runs)",
+                    halign="left", valign="middle",
+                ))
+                self.add_widget(intro_option)
+                scroll = ScrollView()
+                self.layout = GridLayout(cols=1, spacing=dp(6), size_hint_y=None)
                 self.layout.bind(minimum_height=self.layout.setter("height"))
-                self.add_widget(self.layout)
+                scroll.add_widget(self.layout)
+                self.add_widget(scroll)
                 Clock.schedule_interval(self.refresh, 0.5)
+
+            @staticmethod
+            def set_skip_intro(_checkbox: CheckBox, enabled: bool) -> None:
+                ctx.skip_startup_intro = bool(enabled)
+                set_skip_startup_intro(ctx.skip_startup_intro)
+                logger.info("Armada startup intro skip will be %s for future launches.",
+                            "enabled" if ctx.skip_startup_intro else "disabled")
 
             def refresh(self, _dt: float) -> None:
                 self.layout.clear_widgets()
@@ -375,7 +402,7 @@ class ArmadaContext(ArmadaContextBase):
                     # map before resuming Armada. A running process uses the
                     # established control pipe instead.
                     started = await asyncio.to_thread(
-                        start_armada_and_observer, ctx.game_root, map_name
+                        start_armada_and_observer, ctx.game_root, map_name, ctx.skip_startup_intro
                     )
                     if started:
                         logger.info("Armada prequeued %s for its native startup campaign controller route.", map_name)
@@ -435,8 +462,10 @@ class ArmadaContext(ArmadaContextBase):
             self.trap_items = {str(name): dict(data) for name, data in slot_data.get("trap_items", {}).items()}
             self.nebula_trap_amount = int(slot_data.get("nebula_trap_amount", 0))
             logger.info("This Armada seed contains %s Nebula Anomaly trap item(s).", self.nebula_trap_amount)
+            self._goal_reported_for_connection = False
             asyncio.create_task(self.flush_pending())
             asyncio.create_task(self.flush_traps())
+            asyncio.create_task(self.report_goal_if_victorious())
         elif cmd == "ReceivedItems":
             indexes = self.ledger.record_received(int(args["index"]), args["items"])
             for offset, item in enumerate(args["items"]):
@@ -455,6 +484,29 @@ class ArmadaContext(ArmadaContextBase):
                     logger.info("Received Armada item index=%s.", index)
             asyncio.create_task(self.flush_pending())
             asyncio.create_task(self.flush_traps())
+            asyncio.create_task(self.report_goal_if_victorious())
+
+    async def report_goal_if_victorious(self) -> None:
+        """Report the Archipelago goal after the server delivers Victory.
+
+        The final-mission location grants Victory through normal item routing;
+        it does not itself change a client's completion status.  Rechecking on
+        every connection also repairs a client that received Victory before a
+        previous client version implemented this status update.
+        """
+        if (self._goal_report_in_progress or self._goal_reported_for_connection or
+                not self.server or "Victory" not in self.received_item_names()):
+            return
+        self._goal_report_in_progress = True
+        try:
+            await self.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
+        except Exception:
+            logger.exception("Could not report Armada goal status; it will retry after reconnecting.")
+        else:
+            self._goal_reported_for_connection = True
+            logger.info("Reported Archipelago goal after receiving Victory.")
+        finally:
+            self._goal_report_in_progress = False
 
     def _schedule_trap_retry(self) -> None:
         if self._trap_retry_scheduled:
@@ -678,7 +730,64 @@ def stop_armada_process(pid: object) -> None:
         logger.warning("Could not close Armada PID %s after mission result: %s", target, result.stderr.strip())
 
 
-def start_armada_and_observer(game_root: Path, launch_map: str | None = None) -> bool:
+def intro_movie_paths(game_root: Path) -> tuple[Path, Path]:
+    animations = game_root / "animations"
+    return animations / INTRO_MOVIE_NAME, animations / INTRO_MOVIE_DISABLED_NAME
+
+
+def suppress_startup_intro(game_root: Path) -> bool:
+    """Temporarily hide only the stock startup movie for a client-launched game."""
+    original, disabled = intro_movie_paths(game_root)
+    if original.is_file():
+        if disabled.exists():
+            logger.warning("Cannot skip Armada startup intro: both %s and %s exist.", original.name, disabled.name)
+            return False
+        original.replace(disabled)
+        logger.info("Temporarily disabled Armada startup intro movie.")
+        return True
+    if disabled.is_file():
+        # A prior client run was interrupted after the rename. It is still the
+        # client-owned backup and remains safe to use for this launch.
+        logger.info("Armada startup intro is already temporarily disabled from an earlier client run.")
+        return True
+    logger.warning("Armada startup intro movie was not found at %s; leaving game files unchanged.", original)
+    return False
+
+
+def restore_startup_intro(game_root: Path) -> None:
+    """Restore the exact startup movie name without overwriting a user file."""
+    original, disabled = intro_movie_paths(game_root)
+    if not disabled.is_file():
+        return
+    if original.exists():
+        logger.warning("Preserved Armada startup intro backup because %s already exists.", original)
+        return
+    disabled.replace(original)
+    logger.info("Restored Armada startup intro movie.")
+
+
+def schedule_startup_intro_restore(game_root: Path) -> None:
+    """Restore only after every Armada.exe process has exited."""
+    key = str(game_root.resolve()).casefold()
+    with _intro_restore_lock:
+        if key in _intro_restore_roots:
+            return
+        _intro_restore_roots.add(key)
+
+    def restore_when_safe() -> None:
+        try:
+            while find_armada_pid():
+                time.sleep(1)
+            restore_startup_intro(game_root)
+        finally:
+            with _intro_restore_lock:
+                _intro_restore_roots.discard(key)
+
+    threading.Thread(target=restore_when_safe, name="Armada intro movie restore", daemon=True).start()
+
+
+def start_armada_and_observer(game_root: Path, launch_map: str | None = None,
+                              skip_startup_intro: bool = True) -> bool:
     game = game_root / "Armada.exe"
     injector = game_root / "armada_injector.exe"
     observer = game_root / "armada_observer.dll"
@@ -690,8 +799,13 @@ def start_armada_and_observer(game_root: Path, launch_map: str | None = None) ->
             )
     pid = find_armada_pid()
     started = False
+    intro_suppressed = False
     if not pid:
         started = True
+        if skip_startup_intro:
+            intro_suppressed = suppress_startup_intro(game_root)
+        else:
+            restore_startup_intro(game_root)
         logger.info("Starting Armada with the observer preloaded...")
         command = [str(injector), str(observer), "--launch", str(game)]
         if launch_map:
@@ -699,19 +813,27 @@ def start_armada_and_observer(game_root: Path, launch_map: str | None = None) ->
         result = run_hidden(command)
         if result.returncode:
             detail = result.stderr.strip() or result.stdout.strip()
+            if intro_suppressed:
+                restore_startup_intro(game_root)
             raise RuntimeError(f"Armada startup/injection failed with exit code {result.returncode}: {detail}")
         deadline = time.monotonic() + 30
         while not pid and time.monotonic() < deadline:
             time.sleep(0.25)
             pid = find_armada_pid()
     if not pid:
+        if intro_suppressed:
+            restore_startup_intro(game_root)
         raise RuntimeError("Armada.exe did not start within 30 seconds.")
     if find_armada_pid() != pid:
+        if intro_suppressed:
+            schedule_startup_intro_restore(game_root)
         raise RuntimeError("Armada.exe exited before the observer could be used.")
     # --launch injects before ResumeThread. Do not snapshot/inject again while
     # Armada is still executing the startup campaign picker; the second pass
     # provides no coverage and races its UI-thread handoff.
     if started:
+        if intro_suppressed:
+            schedule_startup_intro_restore(game_root)
         return True
     result = run_hidden([str(injector), str(observer), "--pid", str(pid), "--if-needed"])
     if result.returncode:
@@ -750,6 +872,17 @@ def save_client_settings(settings: dict[str, object]) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(settings, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def startup_intro_skip_enabled() -> bool:
+    """Return the saved user preference; new installs skip the startup movie."""
+    return bool(load_client_settings().get("skip_startup_intro", True))
+
+
+def set_skip_startup_intro(enabled: bool) -> None:
+    settings = load_client_settings()
+    settings["skip_startup_intro"] = bool(enabled)
+    save_client_settings(settings)
 
 
 def configured_game_root(explicit: Path | None = None) -> Path | None:
@@ -813,6 +946,7 @@ async def run(connect: str | None, password: str | None, name: str | None,
         ctx = ArmadaContext(connect, password, ledger)
         ctx.username = name
         ctx.game_root = game_root
+        ctx.skip_startup_intro = startup_intro_skip_enabled()
         ctx.server_task = asyncio.create_task(server_loop(ctx), name="server loop")
         if UNIVERSAL_TRACKER_AVAILABLE:
             ctx.run_generator()
@@ -825,6 +959,8 @@ async def run(connect: str | None, password: str | None, name: str | None,
         await asyncio.gather(observer, return_exceptions=True)
         await ctx.shutdown()
     finally:
+        if game_root and not find_armada_pid():
+            restore_startup_intro(game_root)
         ledger.close()
 
 
@@ -843,4 +979,6 @@ def launch(*args: str) -> None:
         return
     if game_root is None and gui_enabled:
         game_root = prompt_for_game_root()
+    if game_root is not None and not find_armada_pid():
+        restore_startup_intro(game_root)
     asyncio.run(run(parsed.connect, parsed.password, parsed.name, game_root))

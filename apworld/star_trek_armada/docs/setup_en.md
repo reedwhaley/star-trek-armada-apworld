@@ -29,6 +29,14 @@ unlocked; starting Armada attaches the matching observer automatically. No
 separate pipe reader, injector command, bridge command, or environment variable
 is required.
 
+The Mission Launcher has a saved **Skip Armada startup intro** checkbox,
+enabled by default. For a client-launched mission it temporarily renames only
+`animations\STIntro.bik`, then restores the exact filename after every
+`Armada.exe` process has exited. No movie file is deleted, and campaign bridge
+movies and ending cinematics are never intercepted or changed. If the client or
+game is interrupted, the next client launch repairs a leftover temporary rename
+before starting another mission.
+
 When launched from a terminal, `--game-root` can override the saved retail
 Armada installation folder.
 
@@ -58,7 +66,8 @@ The campaign order and mission names are taken from Armada's `mshell.set`.
 Filename suffixes are not campaign numbers; for example, Federation Mission 3
 is **Vendetta** and loads `Federation5S.dsl`. The goal is **The Alpha and the
 Omega, Part II** (Finale Mission 4); checking that completion location awards
-the internal Victory event.
+the internal Victory event. When the client receives Victory, it automatically
+reports the Archipelago goal status so the room releases and collects normally.
 
 `finale_mission_completion_requirement` controls how many other campaign
 mission completions are required before **The Alpha and the Omega, Part II**
