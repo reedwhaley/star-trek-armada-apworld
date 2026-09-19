@@ -11,7 +11,6 @@ typedef void (__cdecl *MissionResultFn)(float, const char*);
 typedef void (__cdecl *ObjectiveTextFn)(const char*);
 typedef void (__cdecl *FrontEndModalDispatchFn)(int);
 typedef INT_PTR (CALLBACK *CampaignDialogProcFn)(HWND, UINT, WPARAM, LPARAM);
-typedef bool (__thiscall *CampaignControllerDialogRouteFn)(void*);
 typedef DWORD (WINAPI *GetTickCountFn)();
 typedef DWORD (WINAPI *TimeGetTimeFn)();
 typedef BOOL (WINAPI *QueryPerformanceCounterFn)(LARGE_INTEGER*);
@@ -35,7 +34,6 @@ static CampaignDialogProcFn g_original_campaign_dialog_proc = nullptr;
 static CampaignDialogProcFn g_original_mission_dialog_proc = nullptr;
 static EngineSelectionSetupFn g_original_engine_selection_setup = nullptr;
 static CampaignSelectionDispatchFn g_original_campaign_selection_dispatch = nullptr;
-static CampaignControllerDialogRouteFn g_original_campaign_controller_dialog_route = nullptr;
 static volatile LONG g_redirect_initial_front_end_mode = 0;
 static volatile LONG g_auto_select_campaign_map = 0;
 static volatile LONG g_auto_select_mission = 0;
@@ -696,21 +694,6 @@ static void __fastcall HookCampaignSelectionDispatch(void* controller, void*) {
     if (g_original_campaign_selection_dispatch) g_original_campaign_selection_dispatch(controller);
 }
 
-static bool __fastcall HookCampaignControllerDialogRoute(void* controller, void*) {
-    char status[192] = {};
-    _snprintf_s(status, ARRAYSIZE(status), _TRUNCATE,
-                "[ARMADA_OBSERVER] stock campaign controller dialog route entered controller=%p\n", controller);
-    Status(status);
-    const bool result = g_original_campaign_controller_dialog_route
-        ? g_original_campaign_controller_dialog_route(controller) : false;
-    _snprintf_s(status, ARRAYSIZE(status), _TRUNCATE,
-                "[ARMADA_OBSERVER] stock campaign controller dialog route returned result=%d mode=%lu\n",
-                result ? 1 : 0,
-                *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + 0x1FA810));
-    Status(status);
-    return result;
-}
-
 // Armada+0x14F910 is the stock cdecl modal dispatcher.  Redirect only its
 // first startup main-menu request; the original function then creates and
 // owns the campaign dialog exactly as it does after a player selects Campaign.
@@ -1082,13 +1065,6 @@ static DWORD WINAPI Initialize(void*) {
                 Status("[ARMADA_OBSERVER] post-picker stock route diagnostics armed\n");
             } else {
                 Status("[ARMADA_OBSERVER] post-picker stock route diagnostic installation failed\n");
-            }
-            if (InstallHook(reinterpret_cast<uintptr_t>(base + 0x419F0),
-                            reinterpret_cast<void*>(&HookCampaignControllerDialogRoute),
-                            reinterpret_cast<void**>(&g_original_campaign_controller_dialog_route), 16)) {
-                Status("[ARMADA_OBSERVER] stock campaign controller route diagnostic armed\n");
-            } else {
-                Status("[ARMADA_OBSERVER] stock campaign controller route diagnostic installation failed\n");
             }
         }
     }
