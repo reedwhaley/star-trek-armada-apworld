@@ -50,3 +50,9 @@ The client can skip Armada's startup intro without a key macro or a game-code
 movie hook. Its saved Mission Launcher setting temporarily renames only
 `animations\STIntro.bik` while a client-launched Armada process is running and
 restores it when Armada exits. Campaign and ending cinematics remain untouched.
+
+Before it starts a new Armada process, the client also enables the stock
+`GIVE_ALL_MISSIONS` setting in `ART_CFG.h`, which is required for the native
+campaign picker to hand off the Mission Launcher selection. Before its first
+change, it creates `ART_CFG.h.archipelago-backup` beside the configuration file.
+It changes no executables or game assets.

@@ -29,6 +29,12 @@ unlocked; starting Armada attaches the matching observer automatically. No
 separate pipe reader, injector command, bridge command, or environment variable
 is required.
 
+Before starting a new Armada process, the client enables the stock
+`GIVE_ALL_MISSIONS` setting in `ART_CFG.h`, which the native campaign picker
+needs to hand off a Mission Launcher selection. Before its first change, it
+creates `ART_CFG.h.archipelago-backup` in the Armada folder. This changes only
+that configuration setting; it does not modify an executable or game asset.
+
 The Mission Launcher has a saved **Skip Armada startup intro** checkbox,
 enabled by default. For a client-launched mission it temporarily renames only
 `animations\STIntro.bik`, then restores the exact filename after every

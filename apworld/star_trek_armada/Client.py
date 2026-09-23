@@ -13,6 +13,7 @@ import asyncio
 import ctypes
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -49,6 +50,14 @@ ERROR_BROKEN_PIPE = 109
 CREATE_NO_WINDOW = 0x08000000
 INTRO_MOVIE_NAME = "STIntro.bik"
 INTRO_MOVIE_DISABLED_NAME = "STIntro.bik.archipelago-disabled"
+CAMPAIGN_CONFIG_NAME = "ART_CFG.h"
+CAMPAIGN_CONFIG_BACKUP_NAME = "ART_CFG.h.archipelago-backup"
+CAMPAIGN_CONFIG_TEMP_NAME = "ART_CFG.h.archipelago-tmp"
+GIVE_ALL_MISSIONS_PATTERN = re.compile(
+    r"^(?P<prefix>[ \t]*int[ \t]+GIVE_ALL_MISSIONS[ \t]*=[ \t]*)(?P<value>[+-]?\d+)"
+    r"(?P<suffix>[ \t]*;[^\r\n]*)\r?$",
+    re.MULTILINE,
+)
 _intro_restore_lock = threading.Lock()
 _intro_restore_roots: set[str] = set()
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -786,6 +795,61 @@ def schedule_startup_intro_restore(game_root: Path) -> None:
     threading.Thread(target=restore_when_safe, name="Armada intro movie restore", daemon=True).start()
 
 
+def ensure_campaign_missions_unlocked(game_root: Path) -> bool:
+    """Enable Armada's stock campaign picker without replacing user configuration.
+
+    Archipelago applies its own access rules in the Mission Launcher, but the
+    native campaign picker must expose its missions for the selected map route.
+    Preserve the first pre-change file beside ART_CFG.h so users can revert the
+    single setting without needing an installer or a copy of their game files.
+    """
+    config = game_root / CAMPAIGN_CONFIG_NAME
+    backup = game_root / CAMPAIGN_CONFIG_BACKUP_NAME
+    temporary = game_root / CAMPAIGN_CONFIG_TEMP_NAME
+    if not config.is_file():
+        logger.error("Armada campaign configuration was not found: %s", config)
+        return False
+    try:
+        # Preserve the retail configuration's line endings byte-for-byte in
+        # both its backup and the otherwise minimal setting change.
+        with config.open("r", encoding="utf-8", newline="") as source:
+            original = source.read()
+    except (OSError, UnicodeError) as error:
+        logger.error("Could not read Armada campaign configuration %s: %s", config, error)
+        return False
+
+    match = GIVE_ALL_MISSIONS_PATTERN.search(original)
+    if match and match.group("value") == "1":
+        logger.info("GIVE_ALL_MISSIONS is already enabled in ART_CFG.h.")
+        return True
+
+    if match:
+        updated = f"{original[:match.start('value')]}1{original[match.end('value'):]}"
+    else:
+        newline = "\r\n" if "\r\n" in original else "\n"
+        suffix = "" if not original or original.endswith(("\n", "\r")) else newline
+        updated = (
+            f"{original}{suffix}{newline}"
+            "// Added by Star Trek: Armada Archipelago for native campaign mission selection."
+            f"{newline}int GIVE_ALL_MISSIONS = 1;{newline}"
+        )
+
+    try:
+        if not backup.exists():
+            backup.write_text(original, encoding="utf-8", newline="")
+        temporary.write_text(updated, encoding="utf-8", newline="")
+        os.replace(temporary, config)
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.error("Could not enable GIVE_ALL_MISSIONS in %s: %s", config, error)
+        return False
+    logger.info("Enabled GIVE_ALL_MISSIONS in ART_CFG.h; backup saved as %s.", backup.name)
+    return True
+
+
 def start_armada_and_observer(game_root: Path, launch_map: str | None = None,
                               skip_startup_intro: bool = True) -> bool:
     game = game_root / "Armada.exe"
@@ -802,6 +866,11 @@ def start_armada_and_observer(game_root: Path, launch_map: str | None = None,
     intro_suppressed = False
     if not pid:
         started = True
+        if not ensure_campaign_missions_unlocked(game_root):
+            raise RuntimeError(
+                f"Could not enable GIVE_ALL_MISSIONS in {game_root / CAMPAIGN_CONFIG_NAME}. "
+                "Check that the Armada folder is writable and try again."
+            )
         if skip_startup_intro:
             intro_suppressed = suppress_startup_intro(game_root)
         else:

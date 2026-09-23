@@ -22,6 +22,8 @@ RELEASE_README = (
     "3. Install star_trek_armada.apworld with the Archipelago Launcher.\n"
     "4. Restart the Archipelago Launcher, then open Star Trek: Armada Client.\n"
     "5. On first launch, select the folder containing Armada.exe when prompted.\n\n"
+    "The client enables the required GIVE_ALL_MISSIONS setting in ART_CFG.h before launching Armada. "
+    "Before its first change it creates ART_CFG.h.archipelago-backup in the Armada folder.\n\n"
     "This unofficial project contains no Armada game files or modified game executables.\n"
 )
 
